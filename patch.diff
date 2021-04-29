@@ -1,0 +1,145 @@
+commit 9f06f3d4e656179dd19dd5ee39fe0da7b459d5ee
+Author: Lijuan Hou <lijuan.hou@sjsu.edu>
+Date:   Wed Apr 28 11:38:24 2021 -0700
+
+    add assignment2 requirement
+
+diff --git a/arch/x86/kvm/cpuid.c b/arch/x86/kvm/cpuid.c
+index 6bd2f8b..326da36 100644
+--- a/arch/x86/kvm/cpuid.c
++++ b/arch/x86/kvm/cpuid.c
+@@ -24,6 +24,11 @@
+ #include "trace.h"
+ #include "pmu.h"
+ 
++u64 exit_counts = 0;
++u64 exit_delta = 0;
++EXPORT_SYMBOL(exit_counts);
++EXPORT_SYMBOL(exit_delta);
++
+ /*
+  * Unlike "struct cpuinfo_x86.x86_capability", kvm_cpu_caps doesn't need to be
+  * aligned to sizeof(unsigned long) because it's not accessed via bitops.
+@@ -1139,6 +1144,18 @@ int kvm_emulate_cpuid(struct kvm_vcpu *vcpu)
+ 	eax = kvm_rax_read(vcpu);
+ 	ecx = kvm_rcx_read(vcpu);
+ 	kvm_cpuid(vcpu, &eax, &ebx, &ecx, &edx, false);
++        printk("Entered kvm_emulate_cpuid, EAX = 0x%x\n", eax);
++        /* cmpe-283 assignment 2*/
++        if (eax == 0x4fffffff) {
++	    kvm_cpuid(vcpu, &eax, &ebx, &ecx, &edx, true);
++            eax = exit_counts;
++            ecx = exit_delta & 0xffffffff;
++            ebx = (exit_delta >> 32) & 0xffffffff;
++        } else {
++	    kvm_cpuid(vcpu, &eax, &ebx, &ecx, &edx, true);
++            printk(KERN_INFO "EAX == 0x%x after kvm_cpuid()\n", eax);
++        }
++
+ 	kvm_rax_write(vcpu, eax);
+ 	kvm_rbx_write(vcpu, ebx);
+ 	kvm_rcx_write(vcpu, ecx);
+diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
+index 29b40e0..cbc9abb 100644
+--- a/arch/x86/kvm/vmx/vmx.c
++++ b/arch/x86/kvm/vmx/vmx.c
+@@ -63,6 +63,9 @@
+ #include "vmx.h"
+ #include "x86.h"
+ 
++extern u64 exit_counts;
++extern u64 exit_delta;
++
+ MODULE_AUTHOR("Qumranet");
+ MODULE_LICENSE("GPL");
+ 
+@@ -5943,11 +5946,15 @@ void dump_vmcs(void)
+  */
+ static int __vmx_handle_exit(struct kvm_vcpu *vcpu, fastpath_t exit_fastpath)
+ {
++        u64 start_tsc = rdtsc();
++        u64 end_tsc = 0;
+ 	struct vcpu_vmx *vmx = to_vmx(vcpu);
+ 	union vmx_exit_reason exit_reason = vmx->exit_reason;
+ 	u32 vectoring_info = vmx->idt_vectoring_info;
+ 	u16 exit_handler_index;
+ 
++	exit_counts++;
++
+ 	/*
+ 	 * Flush logged GPAs PML buffer, this will make dirty_bitmap more
+ 	 * updated. Another good is, in kvm_vm_ioctl_get_dirty_log, before
+@@ -5968,8 +5975,11 @@ static int __vmx_handle_exit(struct kvm_vcpu *vcpu, fastpath_t exit_fastpath)
+ 	WARN_ON_ONCE(vmx->nested.nested_run_pending);
+ 
+ 	/* If guest state is invalid, start emulating */
+-	if (vmx->emulation_required)
+-		return handle_invalid_guest_state(vcpu);
++	if (vmx->emulation_required) {
++	  end_tsc = rdtsc();
++	  exit_delta += end_tsc - start_tsc;
++	  return handle_invalid_guest_state(vcpu);
++	}
+ 
+ 	if (is_guest_mode(vcpu)) {
+ 		/*
+@@ -5992,8 +6002,11 @@ static int __vmx_handle_exit(struct kvm_vcpu *vcpu, fastpath_t exit_fastpath)
+ 		 */
+ 		nested_mark_vmcs12_pages_dirty(vcpu);
+ 
+-		if (nested_vmx_reflect_vmexit(vcpu))
+-			return 1;
++		if (nested_vmx_reflect_vmexit(vcpu)) {
++		  end_tsc = rdtsc();
++		  exit_delta += end_tsc - start_tsc;
++		  return 1;
++		}
+ 	}
+ 
+ 	if (exit_reason.failed_vmentry) {
+@@ -6002,6 +6015,8 @@ static int __vmx_handle_exit(struct kvm_vcpu *vcpu, fastpath_t exit_fastpath)
+ 		vcpu->run->fail_entry.hardware_entry_failure_reason
+ 			= exit_reason.full;
+ 		vcpu->run->fail_entry.cpu = vcpu->arch.last_vmentry_cpu;
++		end_tsc = rdtsc();
++		exit_delta += end_tsc - start_tsc;
+ 		return 0;
+ 	}
+ 
+@@ -6011,6 +6026,8 @@ static int __vmx_handle_exit(struct kvm_vcpu *vcpu, fastpath_t exit_fastpath)
+ 		vcpu->run->fail_entry.hardware_entry_failure_reason
+ 			= vmcs_read32(VM_INSTRUCTION_ERROR);
+ 		vcpu->run->fail_entry.cpu = vcpu->arch.last_vmentry_cpu;
++		end_tsc = rdtsc();
++		exit_delta += end_tsc - start_tsc;
+ 		return 0;
+ 	}
+ 
+@@ -6037,6 +6054,7 @@ static int __vmx_handle_exit(struct kvm_vcpu *vcpu, fastpath_t exit_fastpath)
+ 		if (exit_reason.basic == EXIT_REASON_EPT_MISCONFIG) {
+ 			vcpu->run->internal.data[ndata++] =
+ 				vmcs_read64(GUEST_PHYSICAL_ADDRESS);
++			
+ 		}
+ 		vcpu->run->internal.data[ndata++] = vcpu->arch.last_vmentry_cpu;
+ 		vcpu->run->internal.ndata = ndata;
+@@ -6067,6 +6085,10 @@ static int __vmx_handle_exit(struct kvm_vcpu *vcpu, fastpath_t exit_fastpath)
+ 
+ 	if (exit_reason.basic >= kvm_vmx_max_exit_handlers)
+ 		goto unexpected_vmexit;
++	else {
++                end_tsc = rdtsc();
++                exit_delta += end_tsc - start_tsc;
++	}
+ #ifdef CONFIG_RETPOLINE
+ 	if (exit_reason.basic == EXIT_REASON_MSR_WRITE)
+ 		return kvm_emulate_wrmsr(vcpu);
+@@ -6099,6 +6121,8 @@ static int __vmx_handle_exit(struct kvm_vcpu *vcpu, fastpath_t exit_fastpath)
+ 	vcpu->run->internal.ndata = 2;
+ 	vcpu->run->internal.data[0] = exit_reason.full;
+ 	vcpu->run->internal.data[1] = vcpu->arch.last_vmentry_cpu;
++	end_tsc = rdtsc();
++	exit_delta += end_tsc - start_tsc;
+ 	return 0;
+ }
+ 
