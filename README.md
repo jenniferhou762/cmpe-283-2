@@ -19,4 +19,9 @@
 14. Download another Linux image and use GUI to setup the nested VM.
 15. Implement the test cases and tested.
 
+## Comment on the frequency of exits –
+1. Does the number of exits increase at a stable rate? Or are there more exits performed during certain VM operations?
+I don't think it is a stable rate, the exists can also be caused by other VM instructions/operations such as RDRAND, I/O instruction and RDTSCP.
 
+2. Approximately how many exits does a full VM boot entail?
+For the first boot on my device there are 195248 exits. 
